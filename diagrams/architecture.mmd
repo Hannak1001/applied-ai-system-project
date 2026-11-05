@@ -1,0 +1,27 @@
+flowchart TD
+    U[Human user<br/>mood, activity, and music preferences]
+    A[AGENT<br/>asks adaptive questions<br/>builds and refines UserProfile]
+    R[RAG: RETRIEVAL<br/>searches song metadata and tags]
+    D[(DATA STORE<br/>song catalog: data/songs.csv<br/>or expanded music dataset)]
+    S[EXISTING SOFTWARE: SCORER/RANKER<br/>scores candidates by mood, genre,<br/>energy, and acousticness]
+    G[RAG: GENERATION<br/>creates explanations grounded<br/>in retrieved song data]
+    O[Output<br/>ranked song recommendations<br/>with explanations]
+    T[TESTING/EVALUATION<br/>ranking, data validation,<br/>explanation, and regression checks]
+    H[HUMAN REVIEW<br/>checks relevance, accuracy,<br/>bias, and usefulness]
+
+    U -->|answers and feedback| A
+    A -->|structured preferences| R
+    D -->|song records and metadata| R
+    R -->|relevant candidate songs| S
+    S -->|ranked candidates and scores| G
+    R -->|retrieved evidence| G
+    G --> O
+    O -->|recommendation quality feedback| U
+
+    D -->|test fixtures and edge cases| T
+    S -->|scores and rankings| T
+    G -->|explanations| T
+    T -->|pass/fail results and metrics| H
+    O -->|sample results for review| H
+    H -->|corrections and evaluation insights| A
+    H -->|improvements to rules and tests| S
