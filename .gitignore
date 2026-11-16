@@ -13,3 +13,12 @@ venv/
 
 # Pytest cache
 .pytest_cache/
+
+# Secrets
+.env
+
+# Large raw datasets
+data/spotify_tracks_raw.csv
+
+# Saved chat history
+data/chats.json

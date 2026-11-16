@@ -1,221 +1,199 @@
-# 🎵 Music Recommender Simulation
+# 🎧 VibeMatch: a conversational music recommender with RAG and an agentic workflow
 
-## Project Summary
+You tell it what you're in the mood for, in plain English. It asks only what it needs, searches a catalog of ~8,000 real songs, ranks the candidates with an explainable scoring model, and explains every pick using only facts from the data. You can then steer it with chat ("calmer", "more familiar") or thumbs up and down.
 
-In this project you will build and explain a small music recommender system.
+![Recommender screen](assets/recommender.png)
 
-Your goal is to:
+## Original project (Modules 1–3)
 
-- Represent songs and a user "taste profile" as data
-- Design a scoring rule that turns that data into recommendations
-- Evaluate what your system gets right and wrong
-- Reflect on how this mirrors real world AI recommenders
+This builds on my **Music Recommender Simulation** (model name *VibeMatch 1.0*). It was a content-based recommender over a hand-written 20-song CSV. A fixed taste profile (favorite genre, favorite mood, target energy, acoustic preference) was scored against every song out of 100 (mood 35, genre 25, energy 25, acousticness 15), and a command-line script printed the top 5 with the points each one earned. I evaluated it on three profiles (pop, rock, lofi) and documented its biases in a model card.
 
-Replace this paragraph with your own summary of what your version does.
+That scoring function is still the core of the ranking step here. Everything around it is new: the conversation, the 400× larger catalog, retrieval, grounded explanations, feedback, and the UI.
 
----
+## What it does and why it matters
 
-## How The System Works
+Most "AI music" demos either hand a prompt to an LLM and trust whatever it says (it will invent songs and facts), or they are a static filter with no conversation. VibeMatch is a middle path that I think is how a lot of real applied-AI features should be built:
 
-Real-world platforms like Spotify and YouTube predict what you'll love next by blending two approaches: collaborative filtering, which learns from the behavior of millions of similar users (likes, skips, playlists), and content-based filtering, which compares song attributes such as tempo, energy, and mood. My version is purely content-based, since it has no other users' data. It scores each song by how *close* its attributes are to the user's taste profile, rather than rewarding higher or lower values, and then ranks the songs by score to pick the top results. It prioritizes mood first, then genre and energy, with acousticness as a smaller bonus, because mood best captures what a listener wants right now while genre alone is too narrow in a small catalog.
+- the **LLM only does what it is good at** (understanding messy language and writing a friendly sentence),
+- **deterministic code does what must be right** (which songs exist, how they are ranked, whether a claim is true),
+- and **every AI step has a verified, offline fallback**, so the product keeps working when the model is wrong, rate-limited, or missing.
 
-### Features
+## AI features at a glance
 
-**`Song`** (loaded from `data/songs.csv`):
-
-- `id`, `title`, `artist`: identifying info, not used in scoring
-- `genre`: categorical, matched against the user's favorite genre
-- `mood`: categorical, matched against the user's favorite mood
-- `energy` (0-1): scored by closeness to the user's target energy
-- `acousticness` (0-1): scored against the user's acoustic preference
-- `valence`, `tempo_bpm` and `danceability`: stored but not scored in the first version
-
-**`UserProfile`**:
-
-- `favorite_genre`: the genre to match
-- `favorite_mood`: the mood to match
-- `target_energy` (0-1): the energy level the user wants, so songs are rewarded for being near it
-- `likes_acoustic` (bool): whether to favor high or low acousticness
-
-### Algorithm Recipe
-
-**Data flow:**
-
-```
-INPUT                    PROCESS (the loop)                      OUTPUT
-User Prefs          →    for each song in songs.csv:        →    Ranking
-(genre, mood,              score_song(user, song)                sort by score, highest first
- target energy,            → total points + reasons              return the top K
- likes_acoustic)           collect (song, score, reasons)        with an explanation each
-```
-
-1. **Input:** a `UserProfile` with a favorite genre, favorite mood, target energy and acoustic preference.
-2. **Process:** `load_songs` reads every row of `data/songs.csv`. The loop then judges each song on its own with `score_song`, which returns a total and a list of reasons.
-3. **Output:** `recommend_songs` sorts all scored songs from highest to lowest and returns the top K. Each result carries its reasons, so the user can see why it was picked.
-
-**Scoring rule (max 100 points per song):**
-
-| Feature | Rule | Max points |
+| Feature | What it does | Where |
 |---|---|---|
-| Mood | Exact match gets full points, otherwise 0 | 35 |
-| Genre | Exact match gets full points, otherwise 0 | 25 |
-| Energy | `25 × (1 − abs(song.energy − target_energy))` | 25 |
-| Acousticness | If `likes_acoustic`: `15 × acousticness`. Otherwise: `15 × (1 − acousticness)` | 15 |
+| **Agentic workflow** | A stateful agent runs a multi-step loop: decide what to ask, read the answer, decide when it knows enough, build and refine a user profile from chat and thumbs, then drive retrieval, ranking and explanation. It asks adaptive questions only until it knows your mood or activity, then recommends right away. | [src/agent.py](src/agent.py) |
+| **RAG: retrieval** | Searches the 7,908-song catalog by mood, genre, energy and popularity. If too few songs match, it relaxes one filter at a time and records which, so the UI and the explanations stay honest. | [src/retrieval.py](src/retrieval.py) |
+| **RAG: grounded generation** | Gemini writes one sentence per song from the retrieved facts only. A **verifier** then checks every quoted number, mood, genre and descriptor against the data. Anything that fails is replaced by a template built straight from the data. | [src/explain.py](src/explain.py) |
+| **Feedback loop** | "More upbeat", "calmer", "less acoustic", "more familiar", "hidden gems", a brand-new request, or thumbs up and down all update the profile. | [src/agent.py](src/agent.py) |
+| **Graceful degradation** | No key, no network, or a quota error never breaks the app. Gemini falls back to rule-based extraction, and explanations fall back to templates. | [src/llm.py](src/llm.py) |
+| **Evaluation** | Offline evaluation over 64 profiles plus an adversarial test of the verifier. | [src/evaluate.py](src/evaluate.py) |
 
-**Why these weights:**
+An honest note on "agentic": this is a lightweight, stateful, goal-directed workflow, not an autonomous agent that picks arbitrary tools. The agent decides *what to ask next*, *when it is ready*, and *how to change the profile*, and the surrounding pipeline acts on that. That was a deliberate scope choice (see Design Decisions).
 
-- Mood is worth the most because it matches the listening context. A "chill" listener is happy with lofi, ambient or jazz, but not with a rock song in the wrong mood.
-- Genre is worth less because the catalog has 14 genres across 20 songs, so a genre match often points to a single song. At 25 points it still breaks ties between songs that share a mood.
-- Energy gives partial credit for closeness instead of all-or-nothing, so near misses on genre or mood can still surface.
-- Acousticness is a minor preference that only separates songs that are otherwise close.
+## Architecture overview
 
-### Expected Biases
+![Architecture diagram](assets/architecture.png)
 
-- **Mood and genre are exact string matches.** A "relaxed" jazz song gets no mood credit for a "chill" user, even though the two moods are close. Great songs with a neighboring mood can be under-ranked.
-- **Mood over-prioritization.** Mood plus genre make up 60 points, so a song that matches both can outrank a song that fits the user's energy and acoustic taste perfectly.
-- **Genre acts as a filter in a tiny catalog.** With most genres appearing once, users who name a rarer genre (for example, metal or classical) get one strong match and then weak results.
-- **Single-value profile.** One favorite genre, one mood and one energy target cannot represent someone with varied taste.
-- **Ignored features.** Valence, tempo and danceability are not scored, so two songs with the same score can feel very different.
-- **Catalog skew.** Lofi has 3 of the 20 songs and many genres have 1, so some users will always have more good options than others.
+The editable source is [diagrams/architecture.mmd](diagrams/architecture.mmd).
 
----
+1. **Offline data prep.** [src/data_prep.py](src/data_prep.py) turns the 114k-row Kaggle "Spotify Tracks" file into `data/catalog.csv`: it removes duplicate tracks, derives a **mood** label from valence, energy and sound (the dataset has none), and caps each genre at 70 songs so no genre dominates.
+2. **Agent.** Your messages go to the agent, which extracts preferences (Gemini in JSON mode, or the rule-based fallback) and builds a `UserProfile`.
+3. **Retrieval.** The profile becomes a metadata query against the catalog and returns up to 100 candidates.
+4. **Scorer/ranker.** The original VibeMatch 1.0 scoring function ranks the candidates, with at most one song per artist.
+5. **Generation + verifier.** Gemini explains each pick from the retrieved facts; the verifier accepts or rejects each sentence; rejected ones become template explanations.
+6. **Enrichment and UI.** Deezer's free, keyless API supplies album art and 30-second previews. The Streamlit UI shows cards, playlists, saved chats, and a "Your taste" stats panel.
+7. **Testing and review.** Tests and the evaluation script feed a human review loop, and your thumbs and chat feedback are the runtime review loop back into the agent.
 
-## Getting Started
+## Setup instructions
 
-### Setup
-
-1. Create a virtual environment (optional but recommended):
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate      # Mac or Linux
-   .venv\Scripts\activate         # Windows
-
-2. Install dependencies
+Requires Python 3.10+ (developed on 3.14). No paid services are needed.
 
 ```bash
+# 1. Get the code and create an environment
+git clone <this repo> && cd applied-ai-system-project
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+
+# 2. (Optional but recommended) enable Gemini. It's free: https://aistudio.google.com/apikey
+echo 'GEMINI_API_KEY=your-key-here' > .env
+# optional: pick another model with GEMINI_MODEL=... in .env
+
+# 3. Run the app
+streamlit run app.py
 ```
 
-3. Run the app:
+- **The song catalog is included** (`data/catalog.csv`), so you don't need Kaggle to run the app. To rebuild it, download the [Spotify Tracks Dataset](https://www.kaggle.com/datasets/maharshipandya/-spotify-tracks-dataset) as `data/spotify_tracks_raw.csv` and run `python -m src.data_prep`.
+- **Without a Gemini key** the app still works end to end, using rule-based language understanding and template explanations. With a key, Gemini reads your messages and writes the explanations (each one verified).
+- `.env` and your saved chats (`data/chats.json`) are git-ignored.
+- Command-line version: `python -m src.chat`.
 
 ```bash
-python -m src.main
+pytest                    # 74 tests
+python -m src.evaluate    # offline evaluation report (no network or key needed)
 ```
 
-### Running Tests
+## Sample interactions
 
-Run the starter tests with:
+These are real outputs from the running system (catalog of 7,908 songs).
 
-```bash
-pytest
-```
-
-You can add more tests in `tests/test_recommender.py`.
-
----
-
-## Sample Recommendation Output
+### 1. One message is enough
 
 ```
-Loading songs from data/songs.csv...
-Loaded songs: 20
+You:    late night studying, something calm
+Agent:  (read via Gemini) mood=chill · energy 0.20 · acoustic
 
-High-Energy Pop (pop/happy)
-Top 5 recommendations:
-
-1. Sunrise City by Neon Echo
-   Score: 99.20/100
-   Reasons: mood match (+35.0); genre match (+25.0); energy similarity (+24.5); acousticness preference (+14.7)
-
-2. Rooftop Lights by Indigo Parade
-   Score: 71.75/100
-   Reasons: mood match (+35.0); energy similarity (+24.0); acousticness preference (+12.8)
-
-3. Gym Hero by Max Pulse
-   Score: 59.50/100
-   Reasons: genre match (+25.0); energy similarity (+21.8); acousticness preference (+12.8)
-
-4. Noche de Fuego by Marisol Vega
-   Score: 38.80/100
-   Reasons: energy similarity (+25.0); acousticness preference (+13.8)
-
-5. Night Drive Loop by Neon Echo
-   Score: 38.45/100
-   Reasons: energy similarity (+23.8); acousticness preference (+14.7)
-
-Deep Intense Rock (rock/intense)
-Top 5 recommendations:
-1. Storm Runner by Voltline
-   Score: 99.75/100
-   Reasons: mood match (+35.0); genre match (+25.0); energy similarity (+24.8); acousticness preference (+15.0)
-2. Gym Hero by Max Pulse
-   Score: 74.00/100
-   Reasons: mood match (+35.0); energy similarity (+24.8); acousticness preference (+14.2)
-3. Laser Bloom by Pulse Garden
-   Score: 38.20/100
-   Reasons: energy similarity (+24.3); acousticness preference (+13.9)
-4. Iron Requiem by Black Harbor
-   Score: 37.85/100
-   Reasons: energy similarity (+23.8); acousticness preference (+14.1)
-5. Sunrise City by Neon Echo
-   Score: 36.30/100
-   Reasons: energy similarity (+22.5); acousticness preference (+13.8)
-
-Chill Lofi (lofi/chill)
-Top 5 recommendations:
-1. Midnight Coding by LoRoom
-   Score: 98.15/100
-   Reasons: mood match (+35.0); genre match (+25.0); energy similarity (+24.5); acousticness preference (+13.6)
-2. Library Rain by Paper Lanterns
-   Score: 97.85/100
-   Reasons: mood match (+35.0); genre match (+25.0); energy similarity (+23.8); acousticness preference (+14.1)
-3. Spacewalk Thoughts by Orbit Bloom
-   Score: 70.20/100
-   Reasons: mood match (+35.0); energy similarity (+22.0); acousticness preference (+13.2)
-4. Focus Flow by LoRoom
-   Score: 64.70/100
-   Reasons: genre match (+25.0); energy similarity (+25.0); acousticness preference (+14.7)
-5. Coffee Shop Stories by Slow Stereo
-   Score: 37.90/100
-   Reasons: energy similarity (+24.2); acousticness preference (+13.7)
+  1. First Love Waltz – Rashid Beibutov           [romance/chill]  87% match
+     "Its chill mood matches what you asked for; its energy of 0.20 is very close to
+      your 0.20 target; acousticness of 0.97 suits your taste for acoustic sound."
+  2. Эх, дороги – Georgi Vinogradov, Red Army Choir [romance/chill]  86% match
+  3. Paciencia – Juan D'Arienzo                    [tango/chill]    86% match
 ```
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or demo video link here -->
+Gemini understood the message. Its free quota was used up for the explanations, so the data-built template wrote them, which is the fallback path working as designed. The agent did not ask any follow-up questions because it already knew the mood.
 
----
+### 2. A request that changes with chat, and a grounded Gemini explanation
 
-## Experiments You Tried
+```
+You:    gym, something loud
+You:    hip hop
+Agent:  mood=energetic · genre=hip-hop · energy 0.90 · produced sound
 
-Use this section to document the experiments you ran. For example:
+  1. Gunehgar – DIVINE                              [hip-hop/energetic]  98% match
+  2. Wasted – Anirudh Ravichander                   [hip-hop/energetic]  98% match
+  3. That That (prod. & feat. SUGA of BTS) – PSY    [hip-hop/energetic]  98% match
+```
 
-- What happened when you changed the weight on genre from 2.0 to 0.5
-- What happened when you added tempo or valence to the score
-- How did your system behave for different types of users
+An explanation Gemini wrote earlier for this same kind of request, which passed the verifier: *"This hip-hop track fits your energetic mood request and features an energy level of 0.83."* (The 0.83 is the song's real energy value.) For a mismatched request ("happy opera"), Gemini wrote *"This song does not match the requested genre of opera, but it does match the happy mood you wanted."* It says so honestly when a song only partly fits.
 
----
+### 3. Honest about defaults, and steering with feedback
 
-## Limitations and Risks
+```
+You:    recommend me some romantic music
+Agent:  → recommendations immediately (no extra questions)
+  1. Meant to Be Yours – Ryan McCartan et al.   [show-tunes/romantic]  80% match
+     "Its romantic mood matches what you asked for; its energy is 0.59, near the
+      medium level I assumed."          ← you never gave an energy, so it doesn't claim you did
 
-Summarize some limitations of your recommender.
+You:    more familiar      → median popularity of the picks: 48 → 68
+You:    hidden gems        → median popularity of the picks: 68 → 28
+```
 
-Examples:
+And when the first message is too vague, the agent rephrases once instead of guessing:
 
-- It only works on a tiny catalog
-- It does not understand lyrics or language
-- It might over favor one genre or mood
+```
+You:    hmm not sure
+Agent:  Tell me a bit more: what are you doing, or how do you want to feel?
+        (e.g. studying, working out, relaxing, something upbeat)
+You:    something upbeat with pop    → mood=happy · genre=pop → recommendations
+```
 
-You will go deeper on this in your model card.
+![Home screen](assets/home.png)
+![Taste stats and playlists](assets/stats-and-playlists.png)
 
----
+## Design decisions and trade-offs
+
+- **Keep the original scorer instead of replacing it with an LLM.** It is explainable, deterministic and testable. The trade-off is that its weights (mood 35, genre 25) are my judgment, not learned from data.
+- **Metadata retrieval instead of embeddings.** The catalog has structured audio features, so a filter is precise, fast (about 1–2 ms over 8k songs) and easy to explain. Embeddings would add semantic fuzziness I can't easily verify. The trade-off is that retrieval can't understand a request like "songs that feel like a rainy train ride" beyond the mood labels.
+- **Ground the explanations and verify them, with a template fallback.** A free-form LLM explanation would read better but could state anything. The verifier trades some naturalness (and some false alarms) for claims I can check. It does *not* catch everything (see Testing).
+- **Gemini free tier with an offline fallback.** Everything runs at zero cost. The trade-off is quota limits, which I hit repeatedly while testing. That is exactly why the fallbacks exist.
+- **Recommend after the first useful message.** My first version asked up to four questions before showing anything. A real test showed it just sat waiting. I changed it to recommend as soon as it knows your mood or activity and refine afterward.
+- **Thumbs don't reshuffle the grid.** A like or dislike updates your taste immediately, but the cards only re-rank when you press "Update picks" (or send a message). I traded instant re-ranking for a calm UI with no flicker.
+- **70 songs per genre.** This keeps genres balanced and the catalog small enough to ship in the repo, but it means a genre-plus-mood combination often has too few songs (see Limitations).
+- **Deezer for previews.** Spotify closed its preview and audio-features endpoints to new apps, and Deezer's search needs no key. The trade-off is that not every song exists there, so some cards show no cover or preview.
+
+## Testing summary
+
+**What I tested.** 74 automated tests cover the agent (extraction, adaptive questions, feedback, thumbs), retrieval (tiers, relaxation, popularity, exclusions), the grounding verifier (including a mocked Gemini returning bad output), chat saving, the stats, Deezer matching, and the full Streamlit app driven headlessly (onboarding, Home button, thumbs, saved chats). I also checked behavior in a real Chrome browser (audio, scrolling, animations, no flicker).
+
+**Offline evaluation** (`python -m src.evaluate`, 8 moods × 8 genre choices = 64 profiles, top 6 each):
+
+| Measure | Result |
+|---|---|
+| Returned a full set of 6 picks | 100% |
+| Picks that match the requested mood | 100% |
+| Average distinct artists in the 6 picks | 6.0 |
+| Average distance from target energy | 0.020 |
+| Template explanations that pass the grounding check | 100% |
+| Genre variety when no genre is chosen | 32 genres; top 5 genres = 38% of picks |
+| Average popularity of picks vs. whole catalog | 46.2 vs. 51.2 (no bias toward hits) |
+| Verifier: bad explanations rejected | **7 of 10** |
+| Verifier: good explanations wrongly rejected | 0 of 3 |
+| **Picks that match a requested genre** | **34%** (weak spot) |
+| **Profiles retrieved without relaxing a filter** | **31%** (weak spot) |
+
+**What worked.** Splitting responsibilities (LLM for language, code for facts) made the system easy to test and robust. The verifier caught invented numbers, wrong moods and genres, and mismatched descriptors. The fallbacks meant that Gemini quota errors, which happened constantly, never broke the app.
+
+**What didn't, or only partly worked.**
+- **The verifier misses claims that contain no numbers or catalog words.** It correctly rejected 7 of 10 bad explanations but missed "the singer's powerful voice shines", "a prominent piano melody", and "the sad lyrics resonate". Those are outside-knowledge claims it can't check against the data. The prompt tells Gemini not to say such things, but the verifier alone can't stop it.
+- **Genre requests are often not honored.** 39 of the 56 genre-plus-mood combinations have fewer than 12 songs in the catalog, so retrieval drops the genre and falls back to mood. Only 13 of 56 genre requests returned six songs of that genre.
+- **Mood labels are heuristics** (from valence and energy), so some are off. "Focused" is mostly instrumental tracks, so a study request can return tango or classical.
+
+**Bugs the testing found (and I fixed).** An invisible Streamlit header was swallowing clicks on my top bar. The chat-style page scrolled to the bottom on every load. The verifier raised a false alarm on genres named like moods ("chill" is both). Explanations presented system *defaults* as the user's preferences ("your 0.60 target" when I only said "romantic"). Deezer searches failed when titles had "(feat. x)" or "- Remastered" tails. Gemini's JSON mode needed an API version flag, and a model I had picked was retired for new users.
+
+**What I learned.** Evaluation changes your picture of the system. The unit tests all passed while the evaluation showed 98% (not 100%) of templates passing their own check, and it was the sample interactions that exposed explanations claiming preferences I never stated. Testing the whole flow the way a user would (and reading outputs) found more real problems than testing functions in isolation.
+
+## Limitations
+
+The full discussion is in [model_card.md](model_card.md). In short: moods are derived heuristics, genre-specific requests are often partly unmet, the verifier can't catch every ungrounded claim, previews depend on Deezer having the track, the catalog skews toward whatever the Kaggle dataset contains, and a single profile can't represent mixed tastes ("pop with some classic rock" keeps only one genre).
 
 ## Reflection
 
-Read and complete `model_card.md`:
+The biggest lesson was that the *engineering around the model* matters more than the model. The parts that made this reliable weren't clever prompts. They were boring and checkable: retrieval that narrows the facts, a verifier that rejects ungrounded text, fallbacks for every AI call, and tests that run without a network. It also taught me to distrust my own first version: the onboarding flow I built looked fine until I used it the way a real person would. My responsible-AI reflection (how I worked with AI, a suggestion I accepted and one I revised, and the system's limits) is in [model_card.md](model_card.md).
 
-[**Model Card**](model_card.md)
+## Project structure
 
-Write 1 to 2 paragraphs here about what you learned:
-
-- about how recommenders turn data into predictions
-- about where bias or unfairness could show up in systems like this
+```
+app.py                  Streamlit UI (home, recommender, chats, stats)
+src/agent.py            Conversational agent: questions, extraction, profile, feedback
+src/retrieval.py        RAG retrieval with filter relaxation
+src/recommender.py      VibeMatch 1.0 scoring/ranking (original project)
+src/explain.py          Grounded explanations + verifier + template fallback
+src/llm.py              Gemini client with cooldown and fallbacks
+src/preview.py          Deezer album art and previews
+src/playlists.py        Home playlists + artist-diverse top picks
+src/chat_store.py       Saved chats      src/stats.py   "Your taste" statistics
+src/data_prep.py        Kaggle CSV → catalog        src/evaluate.py   Offline evaluation
+tests/                  74 tests          diagrams/architecture.mmd   System diagram
+```

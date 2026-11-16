@@ -1,27 +1,56 @@
 flowchart TD
-    U[Human user<br/>mood, activity, and music preferences]
-    A[AGENT<br/>asks adaptive questions<br/>builds and refines UserProfile]
-    R[RAG: RETRIEVAL<br/>searches song metadata and tags]
-    D[(DATA STORE<br/>song catalog: data/songs.csv<br/>or expanded music dataset)]
-    S[EXISTING SOFTWARE: SCORER/RANKER<br/>scores candidates by mood, genre,<br/>energy, and acousticness]
-    G[RAG: GENERATION<br/>creates explanations grounded<br/>in retrieved song data]
-    O[Output<br/>ranked song recommendations<br/>with explanations]
-    T[TESTING/EVALUATION<br/>ranking, data validation,<br/>explanation, and regression checks]
-    H[HUMAN REVIEW<br/>checks relevance, accuracy,<br/>bias, and usefulness]
+    subgraph OFFLINE["Offline: data preparation, run once"]
+        K[("Kaggle Spotify Tracks<br/>114k rows")]
+        P["data_prep.py<br/>dedupe tracks, derive mood from valence and energy,<br/>cap at 70 songs per genre"]
+        D[("DATA STORE<br/>data/catalog.csv<br/>7,908 songs")]
+        K --> P --> D
+    end
 
-    U -->|answers and feedback| A
-    A -->|structured preferences| R
+    U["Human user<br/>chat messages, thumbs up and down"]
+    UI["Streamlit UI<br/>home, recommender, chats, stats"]
+    A["AGENT<br/>asks adaptive questions only until mood or activity is known,<br/>then builds and refines the UserProfile from chat and thumbs"]
+    L["LLM: Gemini free tier<br/>JSON-mode preference extraction"]
+    RB["Rule-based fallback<br/>keyword extraction"]
+    R["RAG: RETRIEVAL<br/>metadata filter on mood, genre, energy, popularity,<br/>relaxes one filter at a time if too few songs match"]
+    S["EXISTING SOFTWARE: SCORER/RANKER<br/>mood 35, genre 25, energy 25, acousticness 15,<br/>max one song per artist"]
+    G["RAG: GENERATION<br/>Gemini writes one sentence per song<br/>using only the retrieved facts"]
+    V{"GROUNDING VERIFIER<br/>do numbers, moods, genres and<br/>descriptors match the data?"}
+    T["Template explanation<br/>built directly from the data"]
+    DZ["Deezer API, free and keyless<br/>album art and 30 second preview"]
+    O["Output<br/>song cards: match score, art, preview, explanation"]
+    CS[("CHAT STORE<br/>data/chats.json")]
+    ST["Your taste stats<br/>top moods, genres, energy"]
+    TE["TESTING/EVALUATION<br/>74 pytest tests, src/evaluate.py,<br/>verifier adversarial check"]
+    H["HUMAN REVIEW<br/>developer reads eval results and samples;<br/>user feedback at runtime"]
+
+    U -->|messages and thumbs| UI
+    UI -->|text and feedback| A
+    A -->|free text| L
+    L -->|structured preferences| A
+    L -.->|no key, quota or error| RB
+    RB -->|structured preferences| A
+    A -->|UserProfile| R
     D -->|song records and metadata| R
-    R -->|relevant candidate songs| S
-    S -->|ranked candidates and scores| G
+    R -->|candidate songs and relaxation note| S
+    S -->|ranked picks and scores| G
     R -->|retrieved evidence| G
-    G --> O
-    O -->|recommendation quality feedback| U
+    G -->|draft explanations| V
+    V -->|grounded| O
+    V -.->|rejected or no key| T
+    T --> O
+    S -->|picks| DZ
+    DZ -->|cover and preview| O
+    O --> UI
+    UI --> U
+    A <-->|save and resume| CS
+    CS --> ST
+    ST --> UI
 
-    D -->|test fixtures and edge cases| T
-    S -->|scores and rankings| T
-    G -->|explanations| T
-    T -->|pass/fail results and metrics| H
+    D -->|fixtures and edge cases| TE
+    R -->|retrieval results| TE
+    S -->|scores and rankings| TE
+    V -->|accept and reject decisions| TE
+    TE -->|pass/fail and metrics| H
     O -->|sample results for review| H
-    H -->|corrections and evaluation insights| A
-    H -->|improvements to rules and tests| S
+    H -->|fixes to rules, thresholds, tests| A
+    H -->|fixes to scoring and verifier| S

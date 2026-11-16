@@ -50,14 +50,17 @@ def load_songs(csv_path: str) -> List[Dict]:
     """Load songs from a CSV file into dictionaries with numeric features."""
     print(f"Loading songs from {csv_path}...")
     songs = []
-    numeric_fields = ("energy", "tempo_bpm", "valence", "danceability", "acousticness")
+    numeric_fields = (
+        "energy", "tempo_bpm", "valence", "danceability", "acousticness", "popularity",
+    )
 
     with open(csv_path, newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
         for row in reader:
             row["id"] = int(row["id"])
             for field in numeric_fields:
-                row[field] = float(row[field])
+                if field in row:  # popularity only exists in the big catalog
+                    row[field] = float(row[field])
             songs.append(row)
 
     return songs
@@ -71,7 +74,11 @@ def score_song(user_prefs: Dict, song: Dict) -> Tuple[float, List[str]]:
         score += 35
         reasons.append("mood match (+35.0)")
 
-    if song["genre"] == user_prefs["genre"]:
+    if user_prefs["genre"] == "any":
+        # No preference: same neutral credit for every song, so ranking is unaffected.
+        score += 12.5
+        reasons.append("no genre preference (+12.5)")
+    elif song["genre"] == user_prefs["genre"]:
         score += 25
         reasons.append("genre match (+25.0)")
 
